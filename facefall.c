@@ -1,18 +1,3 @@
-/*******************************************************************************
-*   FaceFall — 3D mass-spring cloth simulator (raylib, C99, single file)
-*
-*   N x N cloth (structural/shear/bending springs, strain limiting, particle
-*   self-collision on a spatial hash, per-triangle flat-plate aerodynamics,
-*   impact restitution) dropped onto a sphere / cube / .obj collider, shaded
-*   on the GPU and exported to mp4 via ffmpeg at up to 4K / 120 fps.
-*
-*   Build:  build.bat            (Windows, bundled w64devkit + raylib)
-*           cc facefall.c -o facefall -O2 -lraylib -lm    (Linux)
-*   Run:    facefall             interactive
-*           facefall --render    render + export, then exit
-*           facefall --selftest  run physics self-checks, then exit
-*******************************************************************************/
-
 #include "raylib.h"
 #include "raymath.h"
 #include "rlgl.h"
@@ -23,8 +8,6 @@
 #include <math.h>
 #include <assert.h>
 
-/* Windows _popen needs BINARY mode ("wb"): text mode turns every 0x0A in the
- * raw pixel stream into 0x0D 0x0A and shears the video. */
 #ifdef _WIN32
     #define POPEN(cmd, mode)  _popen(cmd, mode)
     #define PCLOSE(fp)        _pclose(fp)
@@ -37,15 +20,11 @@
     #define DEVNULL           "/dev/null"
 #endif
 
-/* ============================================================================
- *  TUNABLES
- * ========================================================================= */
 
-#define SCREEN_W            1280     /* interactive preview window            */
+#define SCREEN_W            1280     
 #define SCREEN_H            720
 
-/* Export resolutions, decoupled from the preview window. All 16:9 so the
- * camera framing is identical to the preview. */
+
 typedef struct { const char *name; int w, h; } ExportRes;
 static const ExportRes EXPORT_RES[] = {
     { "720p",  1280, 720  },
@@ -55,76 +34,54 @@ static const ExportRes EXPORT_RES[] = {
 };
 #define NUM_EXPORT_RES (int)(sizeof(EXPORT_RES)/sizeof(EXPORT_RES[0]))
 
-/* Default cloth resolution; re-tessellated at runtime through RESOLUTION_STEPS.
- * (#ifndef so test builds can override with -DGRID_SIZE=128.) */
+
 #ifndef GRID_SIZE
 #define GRID_SIZE           32
 #endif
-#define MAX_GRID            128                   /* hard upper bound        */
+#define MAX_GRID            128                  
 #define MAX_PARTICLES       (MAX_GRID * MAX_GRID)
-#define MAX_SPRINGS         (6 * MAX_GRID * MAX_GRID)   /* struct+shear+slack */
+#define MAX_SPRINGS         (6 * MAX_GRID * MAX_GRID)  
 
-#define DEFAULT_CLOTH_SIZE  4.0f     /* world-space size of the cloth sheet  */
+#define DEFAULT_CLOTH_SIZE  4.0f     
 #define MIN_CLOTH_SIZE      1.0f
 #define MAX_CLOTH_SIZE      10.0f
-#define CLOTH_SPAWN_Y       6.5f     /* spawn height above the collider      */
-#define CLOTH_THICKNESS     0.035f   /* minimum collision shell per particle */
+#define CLOTH_SPAWN_Y       6.5f     
+#define CLOTH_THICKNESS     0.035f   
 
-/* Constant per-particle mass (not total/N^2): keeps the integrator's
- * stability budget the same across resolutions. */
+
 #define PARTICLE_MASS       0.05f
 
-/* Physics defaults. Stiffness / bend / damping / friction are also live
- * fabric-preset parameters (see g_* below and FABRICS[]). */
-#define DEFAULT_STIFFNESS   4500.0f  /* Hooke spring constant k (N/m)        */
-#define DEFAULT_BEND        0.35f    /* bend springs as a fraction of k      */
-#define DEFAULT_DAMPING     1.2f     /* damping along the spring axis        */
-#define DEFAULT_FRICTION    0.20f    /* tangential velocity kept on contact  */
+
+#define DEFAULT_STIFFNESS   4500.0f  
+#define DEFAULT_BEND        0.0f    
+#define DEFAULT_DAMPING     1.2f     
+#define DEFAULT_FRICTION    0.20f    
 #define DEFAULT_GRAVITY     9.81f
 
-/* Impact response. Restitution is the fraction of the normal impact speed
- * returned on a bounce; impacts slower than BOUNCE_THRESHOLD are absorbed
- * outright so resting contact cannot jitter forever — the velocity-threshold
- * trick every rigid-body engine uses (cf. Box2D's b2_velocityThreshold). */
-/* Real fabric returns almost none of its impact energy (drop a towel on a
- * ball: it lands dead), so the presets keep restitution tiny. The parameter
- * still exists and the settings menu goes up to 1.0 for the curious.
- * (#ifndef so scratch builds can sweep it, like GRID_SIZE.) */
+
 #ifndef DEFAULT_RESTITUTION
 #define DEFAULT_RESTITUTION 0.05f
 #endif
 
-/* Contact-spring sizing: the penalty layer is stiff enough to arrest a
- * CONTACT_VREF impact within HALF the collision shell, comfortably clear of
- * the quarter-shell backstop (stopping distance is v/omega, so omega must be
- * at least v / (shell/2)). See ContactPenalty. */
 #define CONTACT_VREF        7.0f     /* m/s */
 #define CONTACT_OMEGA       (2.0f * CONTACT_VREF / g_collisionShell)
 
-/* Aerodynamics. AERO_DRAG is normalised against total cloth mass inside
- * PhysicsSubstep, so the same value gives the same behaviour at every grid
- * resolution: a flat sheet's terminal velocity is sqrt(g / AERO_DRAG).
- * AIR_DRAG is a small residual per-particle drag for numerical calm. */
-#define AERO_DRAG           0.18f    /* flat-plate pressure-drag coefficient */
-#define AIR_DRAG            0.06f    /* linear drag, F = -c*v                */
+
+#define AERO_DRAG           0.18f   
+#define AIR_DRAG            0.06f    
 
 #ifndef MAX_STRETCH
-#define MAX_STRETCH         1.08f    /* springs may not exceed 108% rest len */
+#define MAX_STRETCH         1.08f   
 #endif
-#define STRAIN_ITERATIONS   3        /* strain-limiting passes per substep   */
+#define STRAIN_ITERATIONS   3        
 
 #define FRAME_DT            (1.0f / (float)RENDER_FPS)  /* timestep = video rate */
 
 #define GROUND_Y            0.0f
-#define STICK_SPEED         0.30f    /* tangential speed below which a contact
-                                        sticks (static friction) so a hanging
-                                        skirt doesn't drag the sheet off      */
+#define STICK_SPEED         0.30f    
 
-/* Render/export settings. The sim's fixed timestep is locked to RENDER_FPS,
- * so raising it both smooths the video and halves the integration step; the
- * 60 Hz interactive preview steps the sim RENDER_FPS/PREVIEW_FPS times per
- * displayed frame to stay real-time. */
-#define RENDER_SECONDS      12
+
+#define RENDER_SECONDS      10
 #define RENDER_FPS          120
 #define PREVIEW_FPS         60
 #define RENDER_TOTAL_FRAMES (RENDER_SECONDS * RENDER_FPS)
@@ -132,48 +89,45 @@ static const ExportRes EXPORT_RES[] = {
 
 /* Places we look for an ffmpeg binary, in order. */
 static const char *FFMPEG_CANDIDATES[] = {
-    "ffmpeg",                                  /* on PATH                    */
-    "tools\\ffmpeg\\bin\\ffmpeg.exe",          /* bundled with this project  */
+    "ffmpeg",                                  
+    "tools\\ffmpeg\\bin\\ffmpeg.exe",          
     "tools/ffmpeg/bin/ffmpeg",
 };
 
 static const int RESOLUTION_STEPS[] = { 2, 4, 8, 16, 24, 32, 48, 64, 96, 128 };
 #define NUM_RESOLUTION_STEPS (int)(sizeof(RESOLUTION_STEPS)/sizeof(RESOLUTION_STEPS[0]))
 
-/* ============================================================================
- *  TYPES
- * ========================================================================= */
+
 
 typedef enum { SPRING_STRUCTURAL, SPRING_SHEAR, SPRING_BENDING } SpringType;
 
 typedef struct Particle {
     Vector3 pos;
-    Vector3 prevPos;  /* last known legal (post-collision) position; the mesh
-                         collider sweeps prevPos->pos so thin geometry can't be
-                         tunnelled through in one substep */
+    Vector3 prevPos;  
+                         
+                         
     Vector3 vel;
-    Vector3 force;    /* accumulator, cleared every substep */
-    float   invMass;  /* 0 => pinned/immovable              */
+    Vector3 force;    
+    float   invMass; 
 } Particle;
 
 typedef struct Spring {
-    int        a, b;      /* particle indices                   */
-    float      restLen;   /* length at which the spring is calm */
+    int        a, b;      
+    float      restLen;   
     SpringType type;
 } Spring;
 
-/* A fabric preset: one row of feel-defining parameters. */
+
 typedef struct Fabric {
     const char *name;
-    float stiffness;      /* stretch resistance (N/m)              */
-    float bend;           /* bend-spring stiffness, fraction of k  */
-    float damping;        /* spring-axis damping                   */
-    float friction;       /* contact tangential retention          */
-    float restitution;    /* impact energy return [0,1]; ~0 for real cloth */
+    float stiffness;      
+    float bend;          
+    float damping;        
+    float friction;      
+    float restitution;    
 } Fabric;
 
 static const Fabric FABRICS[] = {
-    /*  name       stiffness  bend   damping  friction  restitution */
     { "silk",       4000.0f, 0.15f,  1.0f,    0.15f,    0.02f },
     { "cotton",     4500.0f, 0.35f,  1.2f,    0.25f,    0.05f },
     { "denim",      7000.0f, 0.60f,  1.8f,    0.40f,    0.08f },
@@ -185,24 +139,21 @@ typedef enum { COLLIDER_SPHERE = 0, COLLIDER_CUBE, COLLIDER_MESH, COLLIDER_COUNT
 
 typedef enum { MODE_SETTINGS, MODE_PREVIEW, MODE_RENDER } AppMode;
 
-/* Loaded .obj baked into world-space triangles, plus a uniform CSR grid so a
- * particle only tests triangles in the few cells around it (broad phase). */
+
 typedef struct MeshCollider {
-    Vector3    *tri;        /* 3 vertices per triangle, flat array */
+    Vector3    *tri;        
     int         triCount;
-    BoundingBox bounds;     /* world-space AABB, inflated for the broad-phase */
-    Model       model;      /* GPU copy for drawing                          */
-    bool        fromFile;   /* true if assets/model.obj was actually found   */
-    int        *gridStart;  /* CSR offsets, gridNx*gridNy*gridNz + 1 entries */
-    int        *gridItems;  /* triangle indices, indexed via gridStart       */
+    BoundingBox bounds;     
+    Model       model;     
+    bool        fromFile;  
+    int        *gridStart;  
+    int        *gridItems; 
     int         gridNx, gridNy, gridNz;
-    Vector3     gridMin;    /* tight AABB min = grid origin                  */
-    Vector3     cellSize;   /* per-axis cell dimensions (always > 0)         */
+    Vector3     gridMin;    
+    Vector3     cellSize;  
 } MeshCollider;
 
-/* ============================================================================
- *  GLOBAL SIMULATION STATE
- * ========================================================================= */
+
 
 static Particle g_particles[MAX_PARTICLES];
 static Spring   g_springs[MAX_SPRINGS];
@@ -210,48 +161,43 @@ static int      g_gridN       = GRID_SIZE;
 static int      g_springCount = 0;
 
 static float g_stiffness   = DEFAULT_STIFFNESS;
-static float g_bend        = DEFAULT_BEND;         /* bend stiffness [0,1]   */
+static float g_bend        = DEFAULT_BEND;         
 static float g_damping     = DEFAULT_DAMPING;
 static float g_friction    = DEFAULT_FRICTION;
 static float g_restitution = DEFAULT_RESTITUTION;
 static float g_gravity     = DEFAULT_GRAVITY;
 static float g_windPower   = 0.0f;
-static bool  g_selfCollide = true;                 /* cloth-on-cloth contact */
+static bool  g_selfCollide = true;                
 static bool  g_pinTopEdge  = false;
 static bool  g_paused     = false;
 static bool  g_wireframe  = false;
 static bool  g_showHelp   = true;
-static int   g_fabric     = 1;                     /* index into FABRICS[]   */
+static int   g_fabric     = 1;                     
 
-/* Surface/lighting parameters fed to the cloth shader. */
-static float g_specular  = 0.5f;                   /* specular intensity     */
-static float g_roughness = 0.45f;                  /* 0 sharp .. 1 broad     */
 
-static float g_clothSize     = DEFAULT_CLOTH_SIZE; /* world units per side   */
-static float g_colliderScale = 1.0f;               /* x0.3 .. x3.0           */
+static float g_specular  = 0.5f;                   
+static float g_roughness = 0.45f;                  
 
-/* Collision shell actually used at runtime. It is CLOTH_THICKNESS at fine
- * resolutions but grows with particle spacing on coarse cloth — see
- * BuildCloth for the reasoning. */
+static float g_clothSize     = DEFAULT_CLOTH_SIZE; 
+static float g_colliderScale = 1.0f;              
+
+
 static float g_collisionShell = CLOTH_THICKNESS;
 
-/* (#ifndef so test builds can boot straight into e.g. COLLIDER_MESH.) */
+
 #ifndef DEFAULT_COLLIDER
 #define DEFAULT_COLLIDER COLLIDER_SPHERE
 #endif
 static ColliderKind g_collider = DEFAULT_COLLIDER;
 static MeshCollider g_meshCollider = { 0 };
 
-/* Collider placement, derived from the user-adjustable scale. All shapes
- * share the X/Z origin so switching between them feels seamless; the sphere
- * hovers a hair above the ground, the cube rests exactly on it. */
+
 static float   SphereRadius(void) { return 1.00f * g_colliderScale; }
 static Vector3 SphereCenter(void) { return (Vector3){ 0.0f, SphereRadius() + 0.15f, 0.0f }; }
 static Vector3 CubeHalf(void)     { float h = 0.85f * g_colliderScale; return (Vector3){ h, h, h }; }
 static Vector3 CubeCenter(void)   { return (Vector3){ 0.0f, CubeHalf().y, 0.0f }; }
 
-/* Highest point of the current collider — used to place the cloth spawn and
- * to pull the camera back when the scene grows. */
+
 static float ColliderTopY(void)
 {
     switch (g_collider)
@@ -265,14 +211,14 @@ static float ColliderTopY(void)
 
 static float g_simTime = 0.0f;
 
-/* GPU resources for the shaded cloth (built in InitClothMesh / BuildCloth). */
+
 static Shader          g_shader        = { 0 };
 static Mesh            g_clothMesh      = { 0 };
 static Material        g_clothMat       = { 0 };
 static bool            g_clothMeshReady = false;
 static int   g_locLightDir, g_locViewPos, g_locSpec, g_locRough;
 
-/* Export state */
+
 static AppMode g_mode = MODE_SETTINGS;
 static FILE   *g_ffmpegPipe   = NULL;
 static int     g_renderFrame  = 0;
@@ -280,12 +226,9 @@ static bool    g_ffmpegOk     = false;
 static char    g_ffmpegPath[260] = "ffmpeg";
 static char    g_statusMsg[256]  = "";
 static double  g_statusUntil     = 0.0;
-static int     g_exportRes    = 1;               /* index into EXPORT_RES[]  */
-static RenderTexture2D g_exportRT = { 0 };       /* offscreen render target  */
+static int     g_exportRes    = 1;              
+static RenderTexture2D g_exportRT = { 0 };       
 
-/* ============================================================================
- *  SMALL HELPERS
- * ========================================================================= */
 
 static void SetStatus(const char *msg)
 {
@@ -296,13 +239,11 @@ static void SetStatus(const char *msg)
 
 static inline int PIndex(int i, int j) { return j * g_gridN + i; }
 
-/* ============================================================================
- *  CLOTH CONSTRUCTION
- * ========================================================================= */
 
-static void RebuildClothMesh(void);   /* GPU mesh (re)alloc, defined below */
 
-/* Add one spring; rest length is the current (flat, unstretched) separation. */
+static void RebuildClothMesh(void);   
+
+
 static void AddSpring(int a, int b, SpringType type)
 {
     if (g_springCount >= MAX_SPRINGS) return;
@@ -315,11 +256,7 @@ static void AddSpring(int a, int b, SpringType type)
 
 
 
-/* (Re)build the cloth: an N x N flat sheet above the collider with structural,
- * shear and bending springs.
- *   STRUCTURAL - grid neighbours; carry weight, resist stretch.
- *   SHEAR      - quad diagonals; resist in-plane collapse to a parallelogram.
- *   BENDING    - skip-one-particle springs; resist folding (softer than k). */
+
 static void BuildCloth(int n)
 {
     g_gridN = n;
@@ -327,11 +264,6 @@ static void BuildCloth(int n)
 
     const float spacing = g_clothSize / (float)(n - 1);
     const float half    = g_clothSize * 0.5f;
-
-    /* Collision shell scales with spacing: collision is per-particle but the
-     * rendered surface spans straight between particles, so on coarse cloth the
-     * span dips into a curved collider. Push particles out ~a third of a cell;
-     * capped so a 2x2 sheet doesn't hover comically high. */
     g_collisionShell = Clamp(0.35f * spacing, CLOTH_THICKNESS, 0.15f);
 
     const float spawnY = fmaxf(CLOTH_SPAWN_Y, ColliderTopY() + 3.0f);
@@ -345,7 +277,7 @@ static void BuildCloth(int n)
         p->vel = (Vector3){ 0 };
         p->force = (Vector3){ 0 };
         p->invMass = 1.0f / PARTICLE_MASS;
-        if (g_pinTopEdge && j == 0) p->invMass = 0.0f;   /* hanging-curtain */
+        if (g_pinTopEdge && j == 0) p->invMass = 0.0f;  
     }
 
     for (int j = 0; j < n; j++)
@@ -366,62 +298,20 @@ static void BuildCloth(int n)
     g_simTime = 0.0f;
 }
 
-/* ============================================================================
- *  COLLISION RESOLUTION
- *
- *  Contact is a penalty layer: the collision shell around each solid acts as
- *  a spring-damper (the classic penalty method — Terzopoulos, Platt, Barr &
- *  Fleischer, "Elastically Deformable Models", SIGGRAPH 1987). A particle
- *  entering the shell is decelerated over several substeps, the layer
- *  stores that energy elastically, and the damping ratio decides how much
- *  comes back — that IS the fabric's restitution. This matters for cloth:
- *  hard per-particle velocity reflection cannot make a sheet bounce, because
- *  neighbours strike a curved surface at different instants and each
- *  reflection incoherently rings its own lattice node against still-seated
- *  neighbours until the springs eat it (verified with a velocity trace).
- *  The penalty layer loads the whole contact patch together and launches it
- *  back as a coherent unit.
- *
- *  Each resolver:
- *    1. Detect: is the particle inside the shell zone around the solid?
- *    2. Penalty: apply the spring-damper impulse along the outward normal,
- *       plus tangential friction while in contact.
- *    3. Backstop: if the particle got deeper than a quarter-shell from the
- *       surface (fast hit, or swept through thin geometry), project it back
- *       out position-wise and absorb the remaining inward velocity.
- * ========================================================================= */
 
-/* Backstop response: discard any remaining inward normal velocity, apply
- * tangential friction (sticking below STICK_SPEED so a hanging skirt doesn't
- * drag the sheet off). Only reached on deep/fast contact. */
 static void ContactAbsorb(Particle *p, Vector3 normal)
 {
     float vn = Vector3DotProduct(p->vel, normal);
     Vector3 vNormal  = Vector3Scale(normal, vn);
     Vector3 vTangent = Vector3Subtract(p->vel, vNormal);
-    if (vn < 0.0f) vNormal = (Vector3){ 0 };          /* moving inward: stop */
+    if (vn < 0.0f) vNormal = (Vector3){ 0 };         
     vTangent = Vector3Scale(vTangent, g_friction);
     if (Vector3LengthSqr(vTangent) < STICK_SPEED * STICK_SPEED)
-        vTangent = (Vector3){ 0 };                    /* static friction     */
+        vTangent = (Vector3){ 0 };                    
     p->vel = Vector3Add(vNormal, vTangent);
 }
 
-/* Penalty spring-damper, applied as a velocity impulse (identical to adding
- * the force next substep, since integration is semi-implicit anyway).
- *
- *   stiffness  kc = m·CONTACT_OMEGA² — arrests a CONTACT_VREF impact within
- *               half the shell (stopping distance v/omega). StepFrame counts
- *               CONTACT_OMEGA in its substep budget, so h·omega stays <= 0.7
- *               at every resolution.
- *   damping    cd = 2ζ·sqrt(kc·m), with the damping ratio ζ derived from
- *               the fabric's restitution e through the logarithmic
- *               decrement of a damped oscillator: ζ = -ln e / √(π²+ln²e).
- *               e→1 rebounds elastically, e→0 lands dead.
- *
- *  Resting contact is a plain static equilibrium of this spring (the cloth
- *  floats mg/kc — a millimetre or two — inside the shell), so unlike
- *  reflection-based restitution there is no jitter and no need for a
- *  velocity threshold. Friction runs whenever the layer is compressed. */
+
 static void ContactPenalty(Particle *p, Vector3 normal, float depth, float h)
 {
     if (depth <= 0.0f || p->invMass == 0.0f) return;
@@ -438,7 +328,7 @@ static void ContactPenalty(Particle *p, Vector3 normal, float depth, float h)
     {
         p->vel = Vector3Add(p->vel, Vector3Scale(normal, fn * p->invMass * h));
 
-        /* friction while the layer carries load */
+        
         vn = Vector3DotProduct(p->vel, normal);
         Vector3 vNormal  = Vector3Scale(normal, vn);
         Vector3 vTangent = Vector3Subtract(p->vel, vNormal);
@@ -449,7 +339,7 @@ static void ContactPenalty(Particle *p, Vector3 normal, float depth, float h)
     }
 }
 
-/* --- 1. Sphere ------------------------------------------------------------ */
+
 static void CollideSphere(Particle *p, float h)
 {
     Vector3 centre = SphereCenter();
@@ -469,8 +359,6 @@ static void CollideSphere(Particle *p, float h)
     ContactPenalty(p, n, outer - dist, h);
 }
 
-/* --- 2. Cube: axis-aligned box. Near-surface contact runs the penalty
- * layer; fully-inside ejects through the nearest face to the backstop. */
 static void CollideCube(Particle *p, float h)
 {
     Vector3 centre = CubeCenter(), halfExt = CubeHalf();
@@ -504,8 +392,7 @@ static void CollideCube(Particle *p, float h)
     }
     else
     {
-        /* Distance from the particle to each of the six faces; the smallest
-         * one is the cheapest exit route. */
+        
         float dx1 = p->pos.x - lo.x, dx2 = hi.x - p->pos.x;
         float dy1 = p->pos.y - lo.y, dy2 = hi.y - p->pos.y;
         float dz1 = p->pos.z - lo.z, dz2 = hi.z - p->pos.z;
@@ -523,10 +410,7 @@ static void CollideCube(Particle *p, float h)
     }
 }
 
-/* --- 3. Arbitrary mesh (.obj) -----------------------------------------------
- * Closest point on a triangle to a point, from Ericson's "Real-Time Collision
- * Detection" (the Voronoi-region walk). Returns the closest point; barycentric
- * logic is inlined for speed. */
+
 static Vector3 ClosestPointOnTriangle(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
 {
     Vector3 ab = Vector3Subtract(b, a);
@@ -535,40 +419,38 @@ static Vector3 ClosestPointOnTriangle(Vector3 p, Vector3 a, Vector3 b, Vector3 c
 
     float d1 = Vector3DotProduct(ab, ap);
     float d2 = Vector3DotProduct(ac, ap);
-    if (d1 <= 0.0f && d2 <= 0.0f) return a;                    /* vertex A   */
+    if (d1 <= 0.0f && d2 <= 0.0f) return a;                   
 
     Vector3 bp = Vector3Subtract(p, b);
     float d3 = Vector3DotProduct(ab, bp);
     float d4 = Vector3DotProduct(ac, bp);
-    if (d3 >= 0.0f && d4 <= d3) return b;                      /* vertex B   */
+    if (d3 >= 0.0f && d4 <= d3) return b;                     
 
     float vc = d1 * d4 - d3 * d2;
-    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)                /* edge AB    */
+    if (vc <= 0.0f && d1 >= 0.0f && d3 <= 0.0f)               
         return Vector3Add(a, Vector3Scale(ab, d1 / (d1 - d3)));
 
     Vector3 cp = Vector3Subtract(p, c);
     float d5 = Vector3DotProduct(ab, cp);
     float d6 = Vector3DotProduct(ac, cp);
-    if (d6 >= 0.0f && d5 <= d6) return c;                      /* vertex C   */
+    if (d6 >= 0.0f && d5 <= d6) return c;                    
 
     float vb = d5 * d2 - d1 * d6;
-    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)                /* edge AC    */
+    if (vb <= 0.0f && d2 >= 0.0f && d6 <= 0.0f)               
         return Vector3Add(a, Vector3Scale(ac, d2 / (d2 - d6)));
 
     float va = d3 * d6 - d5 * d4;
-    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f)  /* edge BC    */
+    if (va <= 0.0f && (d4 - d3) >= 0.0f && (d5 - d6) >= 0.0f) 
         return Vector3Add(b, Vector3Scale(Vector3Subtract(c, b),
                                           (d4 - d3) / ((d4 - d3) + (d5 - d6))));
 
-    /* Interior of the face */
+   
     float denom = 1.0f / (va + vb + vc);
     return Vector3Add(a, Vector3Add(Vector3Scale(ab, vb * denom),
                                     Vector3Scale(ac, vc * denom)));
 }
 
-/* Map a world coordinate onto a grid axis, clamped to valid cells. Out-of-
- * range positions land in the border cell, which is fine: the CSR lists in
- * those cells already contain everything near the mesh boundary. */
+
 static inline int GridCoord(float v, float origin, float cell, int n)
 {
     int c = (int)((v - origin) / cell);
@@ -577,7 +459,7 @@ static inline int GridCoord(float v, float origin, float cell, int n)
     return c;
 }
 
-/* Geometric (winding-derived) unit normal of triangle t. */
+
 static Vector3 TriNormal(int t)
 {
     Vector3 *tri = &g_meshCollider.tri[t * 3];
@@ -587,10 +469,7 @@ static Vector3 TriNormal(int t)
                                            : (Vector3){ 0, 1, 0 };
 }
 
-/* Möller–Trumbore, segment flavour: does o + t*d (t in [0,1]) cross the
- * triangle? d is the UN-normalised displacement, so t parameterises the
- * segment directly. The barycentric bounds get a hair of slack so a particle
- * can't slip through the mathematical seam between two adjacent triangles. */
+
 static bool SegmentHitsTriangle(Vector3 o, Vector3 d,
                                 Vector3 a, Vector3 b, Vector3 c, float *tOut)
 {
@@ -598,7 +477,7 @@ static bool SegmentHitsTriangle(Vector3 o, Vector3 d,
     Vector3 e2 = Vector3Subtract(c, a);
     Vector3 pv = Vector3CrossProduct(d, e2);
     float det = Vector3DotProduct(e1, pv);
-    if (fabsf(det) < 1e-12f) return false;            /* parallel            */
+    if (fabsf(det) < 1e-12f) return false;           
 
     float inv = 1.0f / det;
     Vector3 tv = Vector3Subtract(o, a);
@@ -616,11 +495,7 @@ static bool SegmentHitsTriangle(Vector3 o, Vector3 d,
     return true;
 }
 
-/* Keep a particle out of the loaded mesh. One walk over the uniform grid does
- * two tests: a SWEEP of the prevPos->pos segment (reverts to the last legal
- * position on a crossing — required for thin geometry a particle can tunnel
- * through in one substep), and a PROXIMITY push-out along the nearest
- * triangle's normal for resting contact. Sidedness trusts the .obj winding. */
+
 static void CollideMesh(Particle *p, float h)
 {
     (void)h;
@@ -628,8 +503,7 @@ static void CollideMesh(Particle *p, float h)
     float travel = Vector3Length(disp);
     float reach  = g_collisionShell + travel;
 
-    /* Cheap broad-phase: skip everything outside the inflated AABB. This
-     * rejects the vast majority of the particles each substep. */
+   
     BoundingBox bb = g_meshCollider.bounds;
     if (p->pos.x < bb.min.x - reach || p->pos.x > bb.max.x + reach ||
         p->pos.y < bb.min.y - reach || p->pos.y > bb.max.y + reach ||
@@ -642,9 +516,7 @@ static void CollideMesh(Particle *p, float h)
     float bestT = 2.0f;                               /* earliest sweep hit  */
     int sweepTri = -1;
 
-    /* Narrow phase over the cells the swept box overlaps. A triangle that
-     * spans several of them gets tested more than once — harmless, both
-     * tests keep a min. */
+   
     const MeshCollider *mc = &g_meshCollider;
     Vector3 lo = Vector3Min(p->pos, p->prevPos);
     Vector3 hi = Vector3Max(p->pos, p->prevPos);
@@ -689,10 +561,7 @@ static void CollideMesh(Particle *p, float h)
 
     if (sweepTri >= 0)
     {
-        /* Crossed a surface: revert to the last legal position (prevPos can't
-         * overshoot) and kill the inward velocity. A normal-offset placement
-         * would overshoot the opposite face on thin features and pump energy.
-         * No penalty here — the proximity pass owns it from next substep. */
+    
         Vector3 faceN = TriNormal(sweepTri);
         Vector3 n = (Vector3DotProduct(disp, faceN) < 0.0f) ? faceN
                                                             : Vector3Negate(faceN);
@@ -711,7 +580,7 @@ static void CollideMesh(Particle *p, float h)
 
     if (Vector3DotProduct(d, faceN) < 0.0f)
     {
-        /* Behind the surface (e.g. spawned inside): eject out the front. */
+        
         p->pos = Vector3Add(bestPoint, Vector3Scale(faceN, backstop));
         ContactAbsorb(p, faceN);
         ContactPenalty(p, faceN, g_collisionShell - backstop, h);
@@ -729,8 +598,7 @@ static void CollideMesh(Particle *p, float h)
     }
 }
 
-/* Infinite ground plane at y = GROUND_Y, so the cloth's skirt has somewhere
- * to land (and bounce). */
+
 static void CollideGround(Particle *p, float h)
 {
     float y = p->pos.y - GROUND_Y;
@@ -747,21 +615,12 @@ static void CollideGround(Particle *p, float h)
     ContactPenalty(p, up, g_collisionShell - y, h);
 }
 
-/* ============================================================================
- *  MESH COLLIDER LOADING
- * ========================================================================= */
-
-/* (Re)bake the already-loaded model into world-space triangles at the
- * current collider scale, then build the uniform grid over them. Called once
- * at startup and again whenever the user changes the collider size. The mesh
- * is normalised — centred, uniformly scaled to a ~2.3 * scale footprint, and
- * rested on the ground. */
 static void BakeMeshCollider(void)
 {
     Model *model = &g_meshCollider.model;
-    if (model->meshCount == 0) return;             /* nothing loaded (yet)   */
+    if (model->meshCount == 0) return;            
 
-    /* Work out the model's own bounding box so we can normalise its size. */
+   
     BoundingBox raw = GetMeshBoundingBox(model->meshes[0]);
     Vector3 size   = Vector3Subtract(raw.max, raw.min);
     Vector3 centre = Vector3Scale(Vector3Add(raw.min, raw.max), 0.5f);
@@ -769,14 +628,12 @@ static void BakeMeshCollider(void)
     if (footprint < 1e-6f) footprint = 1.0f;
     float scale = 2.3f * g_colliderScale / footprint;
 
-    /* Bake every triangle into world space. raylib keeps a CPU-side copy of
-     * mesh.vertices after upload, which is exactly what we need. Indexed and
-     * non-indexed meshes are both handled. */
+  
     Mesh mesh = model->meshes[0];
     int triCount = (mesh.indices != NULL) ? mesh.triangleCount
                                           : mesh.vertexCount / 3;
 
-    MemFree(g_meshCollider.tri);                   /* MemFree(NULL) is fine  */
+    MemFree(g_meshCollider.tri);                   
     MemFree(g_meshCollider.gridStart);
     MemFree(g_meshCollider.gridItems);
 
@@ -791,16 +648,14 @@ static void BakeMeshCollider(void)
             Vector3 v = { mesh.vertices[vi * 3 + 0],
                           mesh.vertices[vi * 3 + 1],
                           mesh.vertices[vi * 3 + 2] };
-            /* centre -> scale -> lift so the lowest point sits on the ground */
+          
             v = Vector3Scale(Vector3Subtract(v, centre), scale);
             v.y += (size.y * 0.5f) * scale;
             g_meshCollider.tri[t * 3 + k] = v;
         }
     }
 
-    /* World AABB. Inflated by a constant that covers the largest possible
-     * collision shell (0.15) plus margin, so the broad-phase never rejects a
-     * particle the narrow phase would have caught. */
+    
     Vector3 mn = g_meshCollider.tri[0], mx = g_meshCollider.tri[0];
     for (int i = 1; i < triCount * 3; i++)
     {
@@ -810,7 +665,7 @@ static void BakeMeshCollider(void)
     g_meshCollider.bounds.min = Vector3SubtractValue(mn, 0.35f);
     g_meshCollider.bounds.max = Vector3AddValue(mx, 0.35f);
 
-    /* --- Uniform grid build (two-pass CSR) ------------------------------ */
+   
     {
         Vector3 ext = Vector3Subtract(mx, mn);
         float target = fmaxf(fmaxf(ext.x, ext.y), ext.z) / 16.0f;
@@ -834,8 +689,7 @@ static void BakeMeshCollider(void)
         int *start = (int *)MemAlloc(sizeof(int) * (cells + 1));
         int *count = (int *)MemAlloc(sizeof(int) * cells);
 
-        /* Pass 1: how many triangles land in each cell (a triangle registers
-         * in every cell its AABB overlaps). Pass 2: fill the item lists. */
+       
         for (int pass = 0; pass < 2; pass++)
         {
             for (int t = 0; t < triCount; t++)
@@ -861,15 +715,14 @@ static void BakeMeshCollider(void)
                 start[0] = 0;
                 for (int c = 0; c < cells; c++) start[c + 1] = start[c] + count[c];
                 g_meshCollider.gridItems = (int *)MemAlloc(sizeof(int) * start[cells]);
-                memset(count, 0, sizeof(int) * cells);   /* reuse as cursor  */
+                memset(count, 0, sizeof(int) * cells);   
             }
         }
         g_meshCollider.gridStart = start;
         MemFree(count);
     }
 
-    /* Keep the model for drawing, transformed the same way we baked the
-     * triangles so what you see is what the cloth collides with. */
+   
     model->transform = MatrixMultiply(
         MatrixMultiply(MatrixTranslate(-centre.x, -centre.y, -centre.z),
                        MatrixScale(scale, scale, scale)),
@@ -880,9 +733,7 @@ static void BakeMeshCollider(void)
              g_meshCollider.gridNy, g_meshCollider.gridNz);
 }
 
-/* Load assets/model.obj, or fall back to a procedurally generated torus if
- * the file is missing (so the demo never breaks), then bake it at the
- * current scale. */
+
 static void LoadMeshCollider(void)
 {
     Model model;
@@ -905,14 +756,11 @@ static void LoadMeshCollider(void)
     BakeMeshCollider();
 }
 
-/* ============================================================================
- *  PHYSICS STEP
- * ========================================================================= */
 
 static void ApplyStrainLimiting(float h);
 
 
-/* Push all particles out of the active collider and the ground. */
+
 static void ResolveColliders(float h)
 {
     const int n2 = g_gridN * g_gridN;
@@ -931,19 +779,7 @@ static void ResolveColliders(float h)
     }
 }
 
-/* ============================================================================
- *  SELF-COLLISION
- *
- *  Particle-particle separation on a uniform spatial hash (Teschner et al.,
- *  "Optimized Spatial Hashing for Collision Detection of Deformable
- *  Objects", VMV 2003 — same magic primes). Any two particles that are not
- *  near-neighbours in the grid are kept at least a cloth-thickness apart:
- *  the overlap is corrected in position space split by inverse mass, and the
- *  closing velocity along the pair axis is removed, so when the sheet folds
- *  or bounces its layers stack on each other instead of raining through.
- *  This is the expensive part of the sim (every pair candidate, every
- *  substep) and can be toggled in the settings menu.
- * ========================================================================= */
+
 
 #define SELF_HASH_SIZE 32768                        /* power of two          */
 static int g_selfHead[SELF_HASH_SIZE];
@@ -959,9 +795,8 @@ static void ResolveSelfCollision(void)
 {
     const int   n       = g_gridN, n2 = n * n;
     const float spacing = g_clothSize / (float)(n - 1);
-    const float minDist = 0.75f * spacing;          /* cloth-on-cloth shell  */
-    const float cell    = minDist;                  /* 27 cells cover a pair */
-
+    const float minDist = 0.75f * spacing;         
+    const float cell    = minDist;                 
     memset(g_selfHead, -1, sizeof(g_selfHead));
     for (int i = 0; i < n2; i++)
     {
@@ -987,11 +822,9 @@ static void ResolveSelfCollision(void)
         for (int b = g_selfHead[SelfHash(ax + dx, ay + dy, az + dz)];
              b >= 0; b = g_selfNext[b])
         {
-            if (b <= a) continue;                   /* each pair once        */
+            if (b <= a) continue;                  
 
-            /* Immediate grid neighbours are held together by springs at less
-             * than minDist by construction; separating them would fight the
-             * spring network, so they are exempt. */
+           
             int bi = b % n, bj = b / n;
             if (abs(ai - bi) <= 1 && abs(aj - bj) <= 1) continue;
 
@@ -1009,8 +842,6 @@ static void ResolveSelfCollision(void)
             pa->pos = Vector3Subtract(pa->pos, Vector3Scale(nrm, push * wa));
             pb->pos = Vector3Add(pb->pos, Vector3Scale(nrm, push * wb));
 
-            /* Kill the closing velocity so the layers rest instead of
-             * re-penetrating next substep (inelastic layer contact). */
             float relV = Vector3DotProduct(Vector3Subtract(pb->vel, pa->vel), nrm);
             if (relV < 0.0f)
             {
@@ -1022,9 +853,7 @@ static void ResolveSelfCollision(void)
     }
 }
 
-/* Wind sampled as a velocity field: a gusting magnitude with a spatial
- * ripple phase so the sheet luffs instead of translating rigidly. Feeds the
- * per-triangle aerodynamics as the free-stream air velocity. */
+
 static Vector3 WindVelocity(Vector3 at)
 {
     if (g_windPower == 0.0f) return (Vector3){ 0 };
@@ -1034,15 +863,12 @@ static Vector3 WindVelocity(Vector3 at)
     return (Vector3){ gust * ripple, 0.0f, gust * -0.35f * ripple };
 }
 
-/* One substep, semi-implicit (symplectic) Euler: accumulate F(x,v), advance v
- * with F, then advance x with the NEW v. Using the updated velocity is what
- * keeps oscillating springs from pumping energy every step. */
+
 static void PhysicsSubstep(float h)
 {
     const int n2 = g_gridN * g_gridN;
 
-    /* External forces: gravity plus a small residual linear drag. The real
-     * air resistance is per-triangle, below. */
+   
     for (int i = 0; i < n2; i++)
     {
         Particle *p = &g_particles[i];
@@ -1050,14 +876,7 @@ static void PhysicsSubstep(float h)
         p->force = Vector3Add(p->force, Vector3Scale(p->vel, -AIR_DRAG * PARTICLE_MASS));
     }
 
-    /* Per-triangle aerodynamics: flat-plate pressure drag, the standard
-     * quadratic drag law F = ½ρ·Cd·A·|v|² projected onto the face normal and
-     * split evenly over the triangle's three particles. A sheet falling
-     * face-on parachutes hard, falling edge-on it slices through, and wind
-     * only pushes on surfaces that actually face it — this is what makes the
-     * fall flutter and billow instead of looking underwater. The combined
-     * coefficient is normalised by total cloth mass (PARTICLE_MASS·N²) so
-     * the SAME AERO_DRAG behaves identically at every grid resolution. */
+  
     {
         const int n = g_gridN;
         const float cAero = AERO_DRAG * PARTICLE_MASS * (float)n2
@@ -1065,7 +884,7 @@ static void PhysicsSubstep(float h)
         for (int j = 0; j < n - 1; j++)
         for (int i = 0; i < n - 1; i++)
         {
-            /* two triangles per grid quad, same split as the render mesh */
+            
             const int q[4] = { PIndex(i, j),     PIndex(i + 1, j),
                                PIndex(i + 1, j + 1), PIndex(i, j + 1) };
             for (int t = 0; t < 2; t++)
@@ -1077,7 +896,7 @@ static void PhysicsSubstep(float h)
                 Vector3 nA = Vector3Scale(Vector3CrossProduct(
                                  Vector3Subtract(p1->pos, p0->pos),
                                  Vector3Subtract(p2->pos, p0->pos)), 0.5f);
-                float area = Vector3Length(nA);     /* |nA| = triangle area  */
+                float area = Vector3Length(nA);    
                 if (area < 1e-9f) continue;
 
                 Vector3 centroid = Vector3Scale(
@@ -1088,8 +907,7 @@ static void PhysicsSubstep(float h)
                 float speed = Vector3Length(vRel);
                 if (speed < 1e-6f) continue;
 
-                /* sign of (v·n̂) flips with the winding, so the force always
-                 * opposes motion through the face — winding-independent */
+             
                 Vector3 nHat = Vector3Scale(nA, 1.0f / area);
                 float vn = Vector3DotProduct(vRel, nHat);
                 Vector3 f = Vector3Scale(nHat, -cAero * area * speed * vn / 3.0f);
@@ -1101,9 +919,7 @@ static void PhysicsSubstep(float h)
         }
     }
 
-    /* Internal springs: Hooke's law with damping projected onto the spring
-     * axis only (damping the full relative velocity would fight rigid rotation
-     * and look like the fabric is swimming through honey). */
+    
     for (int s = 0; s < g_springCount; s++)
     {
         Spring *sp = &g_springs[s];
@@ -1125,7 +941,7 @@ static void PhysicsSubstep(float h)
         pb->force = Vector3Subtract(pb->force, f);
     }
 
-    /* Integrate. */
+   
     for (int i = 0; i < n2; i++)
     {
         Particle *p = &g_particles[i];
@@ -1135,28 +951,13 @@ static void PhysicsSubstep(float h)
         p->pos = Vector3Add(p->pos, Vector3Scale(p->vel, h));
     }
 
-    /* Positional constraints run before collision so the frame never ends with
-     * cloth inside the collider and friction sees every source of motion.
-     * Self-collision goes between them: strain limiting may re-bunch layers,
-     * and the solid collider must have the last word on interpenetration. */
+   
     ApplyStrainLimiting(h);
     if (g_selfCollide) ResolveSelfCollision();
     ResolveColliders(h);
 }
 
-/* Strain limiting (Provot 1995): pull the endpoints of any structural spring
- * stretched past MAX_STRETCH back together in position space. Lets us run
- * believable fabric at a stiffness the integrator can afford; a few
- * Gauss-Seidel passes converge plenty for visuals.
- *
- * Every positional correction also applies the matching velocity impulse
- * (dv = dx/h — the same bookkeeping PBD does when it rebuilds velocity from
- * corrected positions). Without it, position and velocity drift apart: a
- * particle recoiling off the collider gets its position clamped back to its
- * seated neighbours while its velocity keeps insisting it is moving up at
- * 3 m/s (watched it happen in a trace), contact damping then reads that
- * phantom velocity, and the recoil momentum simply evaporates instead of
- * travelling down the sheet as a wave. */
+
 static void ApplyStrainLimiting(float h)
 {
     const float invH = 1.0f / h;
@@ -1174,9 +975,6 @@ static void ApplyStrainLimiting(float h)
             float len = Vector3Length(d);
             float maxLen = sp->restLen * MAX_STRETCH;
             if (len <= maxLen || len < 1e-7f) continue;
-
-            /* Split the correction according to inverse mass, so pinned
-             * particles (invMass = 0) never move. */
             float wa = pa->invMass, wb = pb->invMass;
             float wSum = wa + wb;
             if (wSum <= 0.0f) continue;
@@ -1192,10 +990,6 @@ static void ApplyStrainLimiting(float h)
 
 
 
-/* Advance the sim one video frame using enough substeps to keep the
- * symplectic-Euler stability bound h*omega <= 0.7 for the stiffest thing in
- * the system — the springs or the contact penalty layer, whichever rings
- * faster (raising stiffness buys more substeps instead of exploding). */
 static void StepFrame(void)
 {
     float omega = sqrtf(g_stiffness / PARTICLE_MASS);
@@ -1212,18 +1006,7 @@ static void StepFrame(void)
     }
 }
 
-/* ============================================================================
- *  FFMPEG EXPORT
- *
- *  Each frame we render the scene to an offscreen RenderTexture at the chosen
- *  export resolution, read back its raw RGBA, and fwrite() it into ffmpeg's
- *  stdin. ffmpeg is told the stream geometry up front (-f rawvideo -pix_fmt
- *  rgba -s WxH), so it just consumes W*H*4 bytes per frame and encodes H.264.
- *  The preview window stays at 1280x720 regardless of export size.
- * ========================================================================= */
 
-/* Probe for a usable ffmpeg binary once at startup ("ffmpeg -version" exits 0
- * iff it runs; the redirect keeps its banner off our console). */
 static void DetectFFmpeg(void)
 {
     for (int i = 0; i < (int)(sizeof(FFMPEG_CANDIDATES)/sizeof(FFMPEG_CANDIDATES[0])); i++)
@@ -1255,10 +1038,7 @@ static void BeginRender(void)
 
     int ew = EXPORT_RES[g_exportRes].w, eh = EXPORT_RES[g_exportRes].h;
 
-    /* Offscreen target at export resolution, independent of the window.
-     * The whole command gets an EXTRA outer pair of quotes: _popen hands it to
-     * `cmd /c`, which strips the first and last quote when it sees more than
-     * two — the outer pair exists purely to be sacrificed to that rule. */
+   
     g_exportRT = LoadRenderTexture(ew, eh);
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
@@ -1276,7 +1056,7 @@ static void BeginRender(void)
         return;
     }
 
-    /* Deterministic export: restart the sim from frame zero. */
+    
     BuildCloth(g_gridN);
     g_renderFrame = 0;
     g_mode = MODE_RENDER;
@@ -1288,8 +1068,7 @@ static void EndRender(bool completed)
 {
     if (g_ffmpegPipe != NULL)
     {
-        /* pclose flushes the pipe, waits for ffmpeg to finish, and reaps it.
-         * Skipping this truncates the moov atom and the file won't play. */
+        
         PCLOSE(g_ffmpegPipe);
         g_ffmpegPipe = NULL;
     }
@@ -1303,9 +1082,7 @@ static void EndRender(bool completed)
                         : "Export cancelled (partial file written)");
 }
 
-/* Read the export render target back and ship it down the pipe. Called while
- * g_exportRT is still bound, so rlReadScreenPixels reads the RT (not the
- * window) and flips it to top-left origin, ready to stream as-is. */
+
 static bool PipeFrame(int w, int h)
 {
     unsigned char *pixels = rlReadScreenPixels(w, h);
@@ -1321,15 +1098,7 @@ static bool PipeFrame(int w, int h)
     return true;
 }
 
-/* ============================================================================
- *  RENDERING
- * ========================================================================= */
 
-/* GLSL 330 lighting shader shared by cloth and collider. Diffuse + Blinn-Phong
- * specular, a rim term for silhouette pop, and (cloth only) a procedural weave
- * normal perturbation plus a subsurface backlight so thin fabric glows when lit
- * from behind. The surface is two-sided: the normal is flipped toward the
- * viewer in the fragment stage so folds are never black. */
 static const char *CLOTH_VS =
     "#version 330\n"
     "in vec3 vertexPosition; in vec2 vertexTexCoord; in vec3 vertexNormal; in vec4 vertexColor;\n"
@@ -1399,8 +1168,7 @@ static void InitShaders(void)
     g_cubeMesh   = GenMeshCube(1.0f, 1.0f, 1.0f);
 }
 
-/* Write current particle positions and smoothed vertex normals into the cloth
- * mesh's CPU arrays (normals = normalised sum of surrounding face normals). */
+
 static void FillClothVertices(void)
 {
     const int n = g_gridN;
@@ -1432,11 +1200,10 @@ static void FillClothVertices(void)
     }
 }
 
-/* (Re)allocate the cloth GPU mesh when the resolution changes. Static topology
- * (indices, uvs) is set once; positions/normals stream every frame. */
+
 static void RebuildClothMesh(void)
 {
-    if (g_shader.id == 0) return;               /* shaders not up yet */
+    if (g_shader.id == 0) return;               
     const int n = g_gridN;
     const int verts = n * n, tris = 2 * (n-1) * (n-1);
     if (g_clothMeshReady && g_clothMesh.vertexCount == verts) { FillClothVertices(); return; }
@@ -1469,7 +1236,7 @@ static void RebuildClothMesh(void)
 
     g_clothMesh = m;
     FillClothVertices();
-    UploadMesh(&g_clothMesh, true);             /* dynamic: streamed each frame */
+    UploadMesh(&g_clothMesh, true);           
     g_clothMeshReady = true;
 }
 
@@ -1487,7 +1254,7 @@ static void DrawCloth(Camera3D camera)
     SetShaderValue(g_shader, g_locRough,    &g_roughness,     SHADER_UNIFORM_FLOAT);
     SetShaderValue(g_shader, g_locCloth,    &cloth,           SHADER_UNIFORM_FLOAT);
 
-    rlDisableBackfaceCulling();                 /* cloth is two-sided */
+    rlDisableBackfaceCulling();                
     DrawMesh(g_clothMesh, g_clothMat, MatrixIdentity());
     rlEnableBackfaceCulling();
 
@@ -1533,8 +1300,7 @@ static void DrawCollider(void)
     }
 }
 
-/* Draw the whole 3D scene (grid, collider, cloth). Called once per frame,
- * either straight to the window or into the export render target. */
+
 static void DrawScene(Camera3D camera, float camScale)
 {
     DrawGrid(20, 0.5f * camScale);
@@ -1542,7 +1308,6 @@ static void DrawScene(Camera3D camera, float camScale)
     DrawCloth(camera);
 }
 
-/* Apply a fabric preset to the live physics parameters. */
 static void ApplyFabric(int idx)
 {
     g_fabric      = idx;
@@ -1603,8 +1368,7 @@ static void DrawHUD(bool freeCam)
     DrawFPS(SCREEN_W - 90, SCREEN_H - 60);
 }
 
-/* The settings screen shown at startup (and after every export). The scene
- * sits frozen behind it so you can see what you are configuring. */
+
 #define SETTINGS_ROWS 17
 
 static void DrawSettings(int row)
@@ -1662,9 +1426,6 @@ static void DrawSettings(int row)
                  (Color){ 255, 120, 100, 255 });
 }
 
-/* ============================================================================
- *  MAIN
- * ========================================================================= */
 
 static int RunSelfTest(void);
 
@@ -1676,16 +1437,15 @@ int main(int argc, char **argv)
     SetConfigFlags(FLAG_MSAA_4X_HINT);
     InitWindow(SCREEN_W, SCREEN_H, "FaceFall - cloth simulator");
     SetTargetFPS(60);
-    SetExitKey(KEY_NULL);    /* ESC navigates modes; only the X quits        */
+    SetExitKey(KEY_NULL);   
 
     DetectFFmpeg();
-    InitShaders();           /* GL context up: build shader, materials, meshes */
+    InitShaders();          
     ApplyFabric(g_fabric);
-    LoadMeshCollider();      /* needs the GL context, so must follow InitWindow */
+    LoadMeshCollider();     
     BuildCloth(GRID_SIZE);
 
-    /* Fixed camera framing the whole drop; F toggles a free fly camera in
-     * preview. Nothing pans on its own. */
+    
     Camera3D camera = { 0 };
     camera.position   = (Vector3){ 8.5f, 6.0f, 8.5f };
     camera.target     = (Vector3){ 0.0f, 2.0f, 0.0f };
@@ -1694,7 +1454,7 @@ int main(int argc, char **argv)
     camera.projection = CAMERA_PERSPECTIVE;
     bool freeCam = false;
 
-    int resStep = 5;         /* index into RESOLUTION_STEPS -> 32            */
+    int resStep = 5;         
     for (int i = 0; i < NUM_RESOLUTION_STEPS; i++)
         if (RESOLUTION_STEPS[i] == GRID_SIZE) resStep = i;
 
@@ -1705,7 +1465,7 @@ int main(int argc, char **argv)
 
     while (!WindowShouldClose() && !quit)
     {
-        /* ------------------------------ input ---------------------------- */
+        
         if (g_mode == MODE_SETTINGS)
         {
             if (IsKeyPressed(KEY_DOWN)) menuRow = (menuRow + 1) % SETTINGS_ROWS;
@@ -1773,25 +1533,18 @@ int main(int argc, char **argv)
 
             if (freeCam) UpdateCamera(&camera, CAMERA_FREE);
         }
-        else /* MODE_RENDER: only allow cancelling */
+        else
         {
             if (IsKeyPressed(KEY_V) || IsKeyPressed(KEY_ESCAPE)) EndRender(false);
         }
 
-        /* ------------------------------ simulate ------------------------- */
-        /* The sim's fixed step is 1/RENDER_FPS. The exporter advances one
-         * step per video frame; the 60 Hz preview window takes
-         * RENDER_FPS/PREVIEW_FPS steps per displayed frame to stay real-time. */
         if (g_mode != MODE_SETTINGS && !g_paused)
         {
             int steps = (g_mode == MODE_PREVIEW) ? RENDER_FPS / PREVIEW_FPS : 1;
             for (int s = 0; s < steps; s++) StepFrame();
         }
 
-        /* Auto-framing: pull the fixed camera back as the cloth or collider
-         * grows so nothing pokes out of frame. At the default sizes this is
-         * exactly the original framing (camScale == 1). Free-cam owns the
-         * camera while it is on. */
+       
         float camScale = fmaxf(1.0f, fmaxf(g_clothSize / 4.0f, ColliderTopY() / 2.2f));
         if (!freeCam)
         {
@@ -1799,7 +1552,6 @@ int main(int argc, char **argv)
             camera.target   = (Vector3){ 0.0f, 2.0f * camScale, 0.0f };
         }
 
-        /* ------------------------------ draw ------------------------------ */
         const Color bg = { 24, 26, 34, 255 };
         bool pipeOk = true;
         BeginDrawing();
@@ -1807,21 +1559,19 @@ int main(int argc, char **argv)
 
             if (g_mode == MODE_RENDER)
             {
-                /* Render the clean scene into the offscreen target at export
-                 * resolution, read it back before the HUD, then blit a scaled
-                 * copy into the window so the user sees progress. */
+               
                 int ew = EXPORT_RES[g_exportRes].w, eh = EXPORT_RES[g_exportRes].h;
                 BeginTextureMode(g_exportRT);
                     ClearBackground(bg);
                     BeginMode3D(camera);
                         DrawScene(camera, camScale);
                     EndMode3D();
-                    rlDrawRenderBatchActive();       /* flush geometry to the FBO */
-                    pipeOk = PipeFrame(ew, eh);      /* read RT while still bound */
+                    rlDrawRenderBatchActive();       
+                    pipeOk = PipeFrame(ew, eh);      
                 EndTextureMode();
 
                 DrawTexturePro(g_exportRT.texture,
-                    (Rectangle){ 0, 0, (float)ew, -(float)eh },   /* flip Y */
+                    (Rectangle){ 0, 0, (float)ew, -(float)eh },  
                     (Rectangle){ 0, 0, SCREEN_W, SCREEN_H },
                     (Vector2){ 0, 0 }, 0.0f, WHITE);
             }
@@ -1840,24 +1590,22 @@ int main(int argc, char **argv)
                          SCREEN_H - 48, 20, YELLOW);
         EndDrawing();
 
-        /* ------------------------------ export --------------------------- */
         if (g_mode == MODE_RENDER)
         {
             if (!pipeOk)
             {
                 EndRender(false);
-                if (autoRender) break;    /* --render: don't idle on failure */
+                if (autoRender) break;    
             }
             else if (++g_renderFrame >= RENDER_TOTAL_FRAMES)
             {
                 EndRender(true);
-                if (autoRender) break;    /* --render: exit when done        */
+                if (autoRender) break;    
             }
         }
     }
 
-    if (g_ffmpegPipe != NULL) EndRender(false);   /* window closed mid-export */
-
+    if (g_ffmpegPipe != NULL) EndRender(false);  
     if (g_clothMeshReady) UnloadMesh(g_clothMesh);
     UnloadMesh(g_sphereMesh);
     UnloadMesh(g_cubeMesh);
@@ -1870,19 +1618,7 @@ int main(int argc, char **argv)
     return 0;
 }
 
-/* ============================================================================
- *  SELF-TEST  (facefall --selftest) — pure-CPU physics checks, no GL.
- * ========================================================================= */
 
-/* Physics checks, two phases. Phase 1 drops the cloth on the SPHERE with the
- * default (realistic, near-zero restitution) fabric and asserts it behaves
- * like fabric: touches down, does NOT visibly bounce, then settles finite
- * and bounded with structural springs inside the strain limit. Phase 2 drops
- * it on the CUBE with restitution cranked to 0.6 and asserts the contact
- * layer really can return energy when asked — the flat top strikes
- * coherently while the skirt is still airborne, so the sheet must rebound
- * visibly in position. Pure CPU: RebuildClothMesh no-ops without a GL
- * context. */
 static int RunSelfTest(void)
 {
     g_pinTopEdge = false;
@@ -1935,9 +1671,7 @@ static int RunSelfTest(void)
     printf("[selftest] worst structural stretch: %.3f (limit %.3f)\n", worst, MAX_STRETCH);
     assert(worst < MAX_STRETCH + 0.05f && "strain limiting failed");
 
-    /* Phase 2: with restitution cranked, a flat coherent impact on the cube
-     * top must bounce — proves the contact layer stores and returns energy
-     * (the machinery the restitution slider drives). */
+   
     g_collider    = COLLIDER_CUBE;
     g_restitution = 0.6f;
     BuildCloth(24);
