@@ -51,4 +51,4 @@ Every frame gets rendered offscreen at the export resolution, read back from the
 
 Written in C99 on top of [raylib](https://www.raylib.com). Video encoding by [ffmpeg](https://ffmpeg.org). The physics techniques come from published work credited in the source comments: Provot's strain limiting, Teschner's spatial hashing, Ericson's closest point on triangle, Moller-Trumbore intersection, and the penalty contact model going back to Terzopoulos et al. 1987.
 
-I built this with AI assistance (Claude Code) doing a lot of the implementation while I directed what it should be and tested what came out. The development story, including the bugs and the dead ends, is in my Stardance devlogs.
+I built this with AI assistance (Claude Code) doing a lot of debugging and helping implement the .obj loading. The development story, including the bugs and the dead ends, is in my Stardance devlogs.
