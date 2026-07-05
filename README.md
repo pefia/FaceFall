@@ -2,7 +2,7 @@
 
 A 3D cloth simulator in one C file. It drops a square of fabric onto a sphere, a cube, or any .obj model you give it, and you can watch it in a live preview or export the whole thing as an mp4 (up to 4K at 120 fps). Made for Hack Club Stardance.
 
-![what it does](https://github.com/pefia/FaceFall)
+## I RECCOMEND 64X64 AND UP FOR REALISM AND TESTING, 128X128 BEING THE BEST
 
 ## What it actually simulates
 
