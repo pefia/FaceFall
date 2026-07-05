@@ -86,9 +86,12 @@ static const ExportRes EXPORT_RES[] = {
  * returned on a bounce; impacts slower than BOUNCE_THRESHOLD are absorbed
  * outright so resting contact cannot jitter forever — the velocity-threshold
  * trick every rigid-body engine uses (cf. Box2D's b2_velocityThreshold). */
-/* (#ifndef so scratch builds can sweep these, like GRID_SIZE.) */
+/* Real fabric returns almost none of its impact energy (drop a towel on a
+ * ball: it lands dead), so the presets keep restitution tiny. The parameter
+ * still exists and the settings menu goes up to 1.0 for the curious.
+ * (#ifndef so scratch builds can sweep it, like GRID_SIZE.) */
 #ifndef DEFAULT_RESTITUTION
-#define DEFAULT_RESTITUTION 0.30f
+#define DEFAULT_RESTITUTION 0.05f
 #endif
 
 /* Contact-spring sizing: the penalty layer is stiff enough to arrest a
@@ -166,15 +169,15 @@ typedef struct Fabric {
     float bend;           /* bend-spring stiffness, fraction of k  */
     float damping;        /* spring-axis damping                   */
     float friction;       /* contact tangential retention          */
-    float restitution;    /* impact bounciness [0,1]               */
+    float restitution;    /* impact energy return [0,1]; ~0 for real cloth */
 } Fabric;
 
 static const Fabric FABRICS[] = {
     /*  name       stiffness  bend   damping  friction  restitution */
-    { "silk",       4000.0f, 0.15f,  1.0f,    0.15f,    0.10f },
-    { "cotton",     4500.0f, 0.35f,  1.2f,    0.25f,    0.30f },
-    { "denim",      7000.0f, 0.60f,  1.8f,    0.40f,    0.45f },
-    { "leather",   10000.0f, 0.85f,  2.5f,    0.55f,    0.55f },
+    { "silk",       4000.0f, 0.15f,  1.0f,    0.15f,    0.02f },
+    { "cotton",     4500.0f, 0.35f,  1.2f,    0.25f,    0.05f },
+    { "denim",      7000.0f, 0.60f,  1.8f,    0.40f,    0.08f },
+    { "leather",   10000.0f, 0.85f,  2.5f,    0.55f,    0.12f },
 };
 #define NUM_FABRICS (int)(sizeof(FABRICS)/sizeof(FABRICS[0]))
 
@@ -1871,16 +1874,15 @@ int main(int argc, char **argv)
  *  SELF-TEST  (facefall --selftest) — pure-CPU physics checks, no GL.
  * ========================================================================= */
 
-/* Physics checks, two phases. Phase 1 drops the cloth on the SPHERE: the
- * hanging skirt anchors a draped sheet almost immediately (inextensible
- * fabric cannot trampoline off a ball — measured ceiling ~3cm even at e=1),
- * so there we assert the contact-layer RECOIL: the centre particle must come
- * back off the surface with real upward velocity. Then the drape must settle
- * finite and bounded with structural springs inside the strain limit.
- * Phase 2 drops the cloth on the CUBE, where the whole flat top strikes
- * coherently while the skirt is still airborne: there the sheet must rebound
- * VISIBLY in position, not just velocity. Pure CPU: RebuildClothMesh no-ops
- * without a GL context. */
+/* Physics checks, two phases. Phase 1 drops the cloth on the SPHERE with the
+ * default (realistic, near-zero restitution) fabric and asserts it behaves
+ * like fabric: touches down, does NOT visibly bounce, then settles finite
+ * and bounded with structural springs inside the strain limit. Phase 2 drops
+ * it on the CUBE with restitution cranked to 0.6 and asserts the contact
+ * layer really can return energy when asked — the flat top strikes
+ * coherently while the skirt is still airborne, so the sheet must rebound
+ * visibly in position. Pure CPU: RebuildClothMesh no-ops without a GL
+ * context. */
 static int RunSelfTest(void)
 {
     g_pinTopEdge = false;
@@ -1892,7 +1894,7 @@ static int RunSelfTest(void)
     const float contactY = SphereCenter().y + SphereRadius()
                          + g_collisionShell + 0.02f;
     bool  touched = false;
-    float vyRecoil = -1e9f;
+    float touchY = 0.0f, reboundPeak = -1e9f;
 
     for (int frame = 0; frame < 3 * RENDER_FPS; frame++)
     {
@@ -1901,13 +1903,13 @@ static int RunSelfTest(void)
 #ifdef TRACE_CENTRE
         printf("f=%d y=%.4f vy=%.3f\n", frame, y, g_particles[centre].vel.y);
 #endif
-        if (!touched) touched = (y <= contactY);
-        else if (g_particles[centre].vel.y > vyRecoil)
-            vyRecoil = g_particles[centre].vel.y;
+        if (!touched) { if (y <= contactY) { touched = true; touchY = y; } }
+        else if (y > reboundPeak) reboundPeak = y;
     }
-    printf("[selftest] sphere: contact recoil vy peak = %+.2f m/s\n", vyRecoil);
+    printf("[selftest] sphere: impact y=%.3f, later peak y=%.3f (+%.3f)\n",
+           touchY, reboundPeak, reboundPeak - touchY);
     assert(touched && "cloth never reached the sphere");
-    assert(vyRecoil > 0.8f && "no contact recoil - restitution broken");
+    assert(reboundPeak - touchY < 0.05f && "real cloth should not bounce");
 
     int n2 = g_gridN * g_gridN;
     float maxY = -1e9f, minY = 1e9f;
@@ -1933,13 +1935,16 @@ static int RunSelfTest(void)
     printf("[selftest] worst structural stretch: %.3f (limit %.3f)\n", worst, MAX_STRETCH);
     assert(worst < MAX_STRETCH + 0.05f && "strain limiting failed");
 
-    /* Phase 2: flat coherent impact on the cube top must bounce for real. */
-    g_collider = COLLIDER_CUBE;
+    /* Phase 2: with restitution cranked, a flat coherent impact on the cube
+     * top must bounce — proves the contact layer stores and returns energy
+     * (the machinery the restitution slider drives). */
+    g_collider    = COLLIDER_CUBE;
+    g_restitution = 0.6f;
     BuildCloth(24);
     const float cubeContactY = CubeCenter().y + CubeHalf().y
                              + g_collisionShell + 0.02f;
     touched = false;
-    float touchY = 0.0f, reboundPeak = -1e9f;
+    touchY = 0.0f; reboundPeak = -1e9f;
 
     for (int frame = 0; frame < 2 * RENDER_FPS; frame++)
     {
@@ -1948,10 +1953,10 @@ static int RunSelfTest(void)
         if (!touched) { if (y <= cubeContactY) { touched = true; touchY = y; } }
         else if (y > reboundPeak) reboundPeak = y;
     }
-    printf("[selftest] cube: impact y=%.3f, rebound peak y=%.3f (+%.3f)\n",
+    printf("[selftest] cube (e=0.6): impact y=%.3f, rebound peak y=%.3f (+%.3f)\n",
            touchY, reboundPeak, reboundPeak - touchY);
     assert(touched && "cloth never reached the cube");
-    assert(reboundPeak > touchY + 0.05f && "flat impact did not bounce");
+    assert(reboundPeak > touchY + 0.05f && "contact layer returned no energy");
 
     printf("[selftest] all checks passed\n");
     return 0;

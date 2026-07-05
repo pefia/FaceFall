@@ -8,3 +8,6 @@ frames/
 
 # local agent/editor settings
 .claude/
+
+# working log; the real devlogs are published on the Stardance site
+DEVLOG.md

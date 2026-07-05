@@ -14,10 +14,10 @@ The cloth is an N x N grid of point masses connected by springs:
 - strain limiting (Provot 1995) keeps any spring from stretching past 108%, which is what makes it behave like fabric instead of rubber
 - self collision on a spatial hash (Teschner et al. 2003), so when the cloth folds over itself the layers stack instead of passing through each other
 - per triangle aerodynamics, a flat plate drag model, so a falling sheet parachutes and flutters instead of sinking like it is underwater. Wind is a velocity field that only pushes on faces that actually face it
-- contact is a penalty layer (the old Terzopoulos 1987 idea): the collision shell around each object acts like a spring and damper, and the damping ratio is derived from the fabric's restitution. That is what makes the cloth actually bounce when it lands, and different fabrics bounce differently
+- contact is a penalty layer (the old Terzopoulos 1987 idea): the collision shell around each object acts like a spring and damper, so the cloth decelerates into the surface over several substeps and settles into a real static equilibrium instead of getting its velocity chopped at a hard boundary. The damping ratio comes from a restitution parameter, which the fabric presets keep near zero because real cloth lands dead. The slider goes up to 1 if you ever want to watch a rubber sheet trampoline off the cube
 - collision against arbitrary meshes uses closest point on triangle (from Ericson's Real Time Collision Detection book) plus a swept segment test (Moller-Trumbore) so fast particles cannot tunnel through thin geometry
 
-One honest note about the bouncing: an inextensible sheet draped over a ball physically cannot trampoline off it, the hanging skirt anchors it almost instantly. I traced this for a while before accepting it. Flat impacts are where the bounce really shows, drop it on the cube and the whole contact patch rebounds together. The selftest checks both cases.
+A note from getting this wrong first: I spent a while trying to make the cloth visibly bounce off the sphere before doing the momentum accounting and accepting that an inextensible sheet draped over a ball physically cannot trampoline, the hanging skirt anchors it almost instantly. The selftest now enforces realism in both directions: with default fabric the sheet must NOT bounce off the sphere, and with restitution cranked to 0.6 it must rebound visibly off the cube's flat top, which proves the contact layer stores and returns energy correctly.
 
 The integrator is semi implicit Euler with automatic substepping: the step count is chosen from the stiffest thing in the system (springs or the contact layer) so it stays stable when you crank the sliders.
 
@@ -51,4 +51,4 @@ Every frame gets rendered offscreen at the export resolution, read back from the
 
 Written in C99 on top of [raylib](https://www.raylib.com). Video encoding by [ffmpeg](https://ffmpeg.org). The physics techniques come from published work credited in the source comments: Provot's strain limiting, Teschner's spatial hashing, Ericson's closest point on triangle, Moller-Trumbore intersection, and the penalty contact model going back to Terzopoulos et al. 1987.
 
-I built this with AI assistance (Claude Code) doing a lot of the implementation while I directed what it should be and tested what came out. The development story, including the bugs, is in [DEVLOG.md](DEVLOG.md).
+I built this with AI assistance (Claude Code) doing a lot of the implementation while I directed what it should be and tested what came out. The development story, including the bugs and the dead ends, is in my Stardance devlogs.
