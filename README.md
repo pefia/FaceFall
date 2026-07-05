@@ -23,13 +23,12 @@ The integrator is semi implicit Euler with automatic substepping: the step count
 
 ## Building
 
-Windows: run `build.bat`. It expects the toolchain in `tools/` which is not checked in because it is a few hundred MB. You need:
+Windows: Install the zip, trun `build.bat`, then open the newly .exe file. It expects the toolchain in `tools/` which is now included, but is 100MB+. It includes:
 
 - [w64devkit](https://github.com/skeeto/w64devkit) unzipped to `tools/w64devkit`
 - [raylib 6.0](https://github.com/raysan5/raylib/releases) (win64 mingw build) unzipped to `tools/raylib-6.0_win64_mingw-w64`
 - [ffmpeg](https://ffmpeg.org) at `tools/ffmpeg/bin/ffmpeg.exe` (or just have it on PATH), only needed for video export
 
-Linux: `cc facefall.c -o facefall -O2 -lraylib -lm` with raylib installed.
 
 ## Running
 
