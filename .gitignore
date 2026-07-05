@@ -1,0 +1,10 @@
+# local toolchains, too big for git (see README for where to get them)
+tools/
+
+# build and render output
+facefall.exe
+facefall_output.mp4
+frames/
+
+# local agent/editor settings
+.claude/
