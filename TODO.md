@@ -1,5 +1,0 @@
-- [x] Identify all project code files containing comments
-- [x] Remove comments from `facefall.c` without changing code behavior
-- [x] Remove comments from `src/*.c` files without changing code behavior
-- [x] Remove comments from `src/facefall.h` without changing code behavior
-- [ ] Verify consistency and provide summary
